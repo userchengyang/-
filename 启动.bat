@@ -1,28 +1,35 @@
 @echo off
+chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
-rem ±¾½Å±¾ÒÔÏµÍ³Ä¬ÈÏ±àÂë(GBK)±£´æ, ÇëÎğÓÃUTF-8±à¼­Æ÷¸ÄĞ´
-set PYTHONIOENCODING=gbk:backslashreplace
+set PYTHONIOENCODING=utf-8
 
 echo ============================================================
-echo    ³¬ĞÇÑ§Ï°Í¨Ë¢¿Î CLI  -  Ò»¼üÆô¶¯
-echo    Ê×´ÎÆô¶¯»áÒıµ¼ÅäÖÃ´ğÌâAI²¢×öÁ¬Í¨ĞÔ²âÊÔ
+echo    è¶…æ˜Ÿå­¦ä¹ é€šåˆ·è¯¾ CLI  -  ä¸€é”®å¯åŠ¨
+echo    è¿è¡Œå‰è¯·å…ˆåœ¨ config.ini çš„ [tiku] æ®µé…ç½®ç­”é¢˜AI
 echo ============================================================
 echo.
 
+rem åªä½¿ç”¨æœ¬æœºå·²å®‰è£…çš„ Python, ä¸åšä»»ä½•å†…ç½®è¿è¡Œç¯å¢ƒ
 where python >nul 2>nul
 if errorlevel 1 (
-    echo [´íÎó] Î´ÕÒµ½ Python, Çë°²×° Python 3.13+ ²¢¹´Ñ¡ "Add python.exe to PATH"
+    echo [é”™è¯¯] æœªæ£€æµ‹åˆ° Python
+    echo.
+    echo   æœ¬ç¨‹åºéœ€è¦åœ¨å·²å®‰è£… Python 3.13 ä»¥ä¸Šç‰ˆæœ¬çš„ç”µè„‘ä¸Šè¿è¡Œã€‚
+    echo   è¯·å…ˆå®‰è£… Python, å®‰è£…æ—¶åŠ¡å¿…å‹¾é€‰ "Add python.exe to PATH",
+    echo   å®‰è£…å®Œæˆåé‡æ–°æ‰“å¼€æœ¬çª—å£å†è¯•ã€‚
+    echo.
     pause
     exit /b 1
 )
 
 python -c "import requests, loguru, openai, tqdm, bs4, lxml, pyaes, fontTools, httpx, ddddocr, chardet, tenacity, urllib3" >nul 2>nul
 if errorlevel 1 (
-    echo [ÌáÊ¾] ÒÀÀµÈ±Ê§, ÕıÔÚ°²×° requirements.txt ...
+    echo [æç¤º] ä¾èµ–ç¼ºå¤±, æ­£åœ¨å®‰è£… requirements.txt ...
     python -m pip install -r requirements.txt
     if errorlevel 1 (
-        echo [´íÎó] ÒÀÀµ°²×°Ê§°Ü, ¿É³¢ÊÔ: python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+        echo [é”™è¯¯] ä¾èµ–å®‰è£…å¤±è´¥, å¯å°è¯•:
+        echo     python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
         pause
         exit /b 1
     )

@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """超星学习通刷课 CLI（核心刷课 + AI 答题）
 
-交互流程:
-  1. 配置答题AI(首次): 接口URL / API Key / 模型 -> 连通性测试
+运行流程:
+  1. 读取 config.ini (答题AI必须在该文件中配置, 程序不提供配置向导)
   2. 输入账号密码登录
   3. 展示课程列表, 选择要刷的课程
   4. 并发执行任务点(视频/文档/章节检测/阅读/直播)
 
-兼容模式:
-  python main.py -c config.ini      # 使用配置文件, 跳过交互向导
-  python main.py -u 账号 -p 密码     # 命令行参数, 跳过交互向导
+模式:
+  python main.py                    # 默认: 读 config.ini, 交互输入账号密码
+  python main.py -c config.ini      # 使用指定配置文件
+  python main.py -u 账号 -p 密码     # 命令行参数
 """
 import argparse
 import configparser
@@ -23,7 +24,6 @@ import traceback
 from dataclasses import dataclass
 from typing import Any
 
-import requests
 from tqdm import tqdm
 
 from api.answer import Tiku
@@ -45,6 +45,7 @@ except ImportError:
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
+CONFIG_TEMPLATE_PATH = os.path.join(BASE_DIR, "config_template.ini")
 
 BANNER = """
 ============================================================
@@ -118,7 +119,7 @@ def load_ini(path: str):
 
 
 def save_ini(path: str, common_config: dict, tiku_config: dict) -> None:
-    """写入配置文件(保留中文注释头)."""
+    """写入配置文件(不含任何注释)."""
     cp = configparser.ConfigParser(interpolation=None)
     cp.optionxform = str  # 保持键名大小写
     cp.add_section("common")
@@ -136,9 +137,72 @@ def save_ini(path: str, common_config: dict, tiku_config: dict) -> None:
         cp.set("tiku", str(key), "" if value is None else str(value))
 
     with open(path, "w", encoding="utf8") as fp:
-        fp.write("; 超星学习通刷课 CLI 配置文件 (首次启动向导自动生成, 可手动修改后重新启动)\n")
         cp.write(fp)
     logger.info(f"配置已保存: {path}")
+
+
+def strip_ini_comments(text: str) -> str:
+    """去掉 ini 文本中的注释行与空行.
+
+    原文件里紧跟字段的注释会被一并删除, 因此对每个 [section] 前补一个空行保持可读性。
+    """
+    out: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith((";", "#")):
+            continue
+        if stripped.startswith("[") and out:
+            out.append("")
+        out.append(line.rstrip())
+    return "\n".join(out) + "\n"
+
+
+def ensure_config(path: str) -> bool:
+    """确保 config.ini 存在.
+
+    不存在时从 config_template.ini 复制一份并去掉全部注释。
+
+    Returns:
+        True 表示配置文件本就存在, False 表示本次刚生成(需要用户填写后重启)
+    """
+    if os.path.isfile(path):
+        return True
+
+    try:
+        with open(CONFIG_TEMPLATE_PATH, "r", encoding="utf8") as fp:
+            content = strip_ini_comments(fp.read())
+        with open(path, "w", encoding="utf8") as fp:
+            fp.write(content)
+        logger.info(f"已根据模板生成配置文件: {path}")
+    except OSError as e:
+        logger.error(f"生成配置文件失败({e}), 将使用内置默认值")
+        save_ini(path, default_common_config(), default_tiku_config())
+    return False
+
+
+def missing_tiku_fields(tiku_config: dict) -> list[str]:
+    """返回 [tiku] 段中缺失的必填项(用于提示用户去配置文件补全)."""
+    required = {
+        "endpoint": "接口地址, 例如 https://api.deepseek.com/v1",
+        "key": "API Key",
+        "model": "模型名称, 例如 deepseek-chat",
+    }
+    return [f"{name} ({desc})" for name, desc in required.items()
+            if not str(tiku_config.get(name, "") or "").strip()]
+
+
+def tiku_config_hint() -> str:
+    """答题AI未配置时给用户看的提示文本."""
+    return (
+        "\n"
+        "  答题AI尚未配置, 请手动编辑配置文件后重新运行:\n"
+        f"    {CONFIG_PATH}\n"
+        "  需要填写 [tiku] 段的以下三项:\n"
+        "    endpoint = 接口地址, 例如 https://api.deepseek.com/v1\n"
+        "    key      = API Key, 例如 sk-xxxxxxxx\n"
+        "    model    = 模型名称, 例如 deepseek-chat\n"
+        "  (字段含义可参考同目录下的 config_template.ini)\n"
+    )
 
 
 def default_common_config() -> dict:
@@ -183,18 +247,8 @@ def create_tiku(tiku_config: dict, config_path: str = None) -> Tiku:
     return tiku
 
 
-def test_ai_connection(tiku_config: dict) -> bool:
-    """对答题AI做一次真实连通性测试."""
-    try:
-        tiku = create_tiku(dict(tiku_config))
-        return tiku.check_llm_connection()
-    except Exception as e:
-        logger.error(f"答题AI连通性测试异常: {e}")
-        return False
-
-
 def normalize_endpoint(raw: str) -> str:
-    """把用户输入的地址规整为 OpenAI 兼容 base_url."""
+    """把用户填写的地址规整为 OpenAI 兼容 base_url."""
     url = (raw or "").strip().rstrip("/")
     lowered = url.lower()
     for suffix in ("/chat/completions", "/v1/chat/completions"):
@@ -202,26 +256,6 @@ def normalize_endpoint(raw: str) -> str:
             url = url[: -len(suffix)]
             break
     return url.rstrip("/")
-
-
-def fetch_models(endpoint: str, key: str) -> list[str]:
-    """尝试拉取可用模型列表(失败返回空列表)."""
-    if not endpoint:
-        return []
-    try:
-        resp = requests.get(
-            f"{endpoint}/models",
-            headers={"Authorization": f"Bearer {key}"},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            data = resp.json().get("data", [])
-            models = [item.get("id") for item in data if isinstance(item, dict) and item.get("id")]
-            return models
-        logger.debug(f"获取模型列表失败: HTTP {resp.status_code}")
-    except Exception as e:
-        logger.debug(f"获取模型列表异常: {e}")
-    return []
 
 
 # ---------------------------------------------------------------------------
@@ -240,75 +274,9 @@ def ask(prompt_text: str, default: str = "", secret: bool = False) -> str:
     return raw
 
 
-def prompt_ai_config(existing_tiku: dict) -> dict:
-    """交互式录入答题AI信息, 返回未验证的tiku配置."""
-    print("  请输入答题AI信息 (示例地址: https://api.deepseek.com/v1)")
-    raw_endpoint = ask("  接口地址 URL: ")
-    while not raw_endpoint:
-        print("  \033[31m地址不能为空\033[0m")
-        raw_endpoint = ask("  接口地址 URL: ")
-    endpoint = normalize_endpoint(raw_endpoint)
-
-    key = ask("  API Key: ", secret=True)
-    while not key:
-        print("  \033[31mAPI Key 不能为空\033[0m")
-        key = ask("  API Key: ", secret=True)
-
-    models = fetch_models(endpoint, key)
-    if models:
-        print("  检测到可用模型:")
-        for idx, name in enumerate(models[:20], 1):
-            print(f"    {idx}. {name}")
-        model = ask("  模型名称 model (回车选用第一个): ") or models[0]
-    else:
-        model = ""
-        while not model:
-            model = ask("  模型名称 model: ")
-            if not model:
-                print("  \033[31m模型名不能为空\033[0m")
-
-    conf = default_tiku_config()
-    conf.update({k: v for k, v in existing_tiku.items() if k not in ("endpoint", "key", "model")})
-    conf.update({"provider": "AI", "endpoint": endpoint, "key": key, "model": model})
-    return conf
-
-
-def wizard_ai_config(existing_tiku: dict) -> dict:
-    """步骤1: 配置答题AI并完成连通性测试, 返回可用的tiku配置."""
-    print("\n[1/3] 答题AI配置 (OpenAI 兼容接口)")
-
-    endpoint = str(existing_tiku.get("endpoint", "") or "").strip()
-    model = str(existing_tiku.get("model", "") or "").strip()
-    key = str(existing_tiku.get("key", "") or "").strip()
-
-    pending = None
-    if endpoint and key and model:
-        print(f"  检测到已有配置: endpoint={endpoint}  model={model}")
-        if ask("  回车直接使用, 输入 r 重新配置: ", default="").lower() != "r":
-            merged = default_tiku_config()
-            merged.update(existing_tiku)
-            pending = merged
-
-    while True:
-        if pending is None:
-            pending = prompt_ai_config(existing_tiku)
-
-        print("  正在进行连通性测试...")
-        if test_ai_connection(pending):
-            print("  \033[32m连通性测试成功\033[0m")
-            return pending
-
-        print("  \033[31m连通性测试失败\033[0m (请检查 URL / API Key / 模型名)")
-        choice = ask("  输入 r 重新配置, q 退出, 回车重试当前配置: ", default="").lower()
-        if choice == "q":
-            raise SystemExit(0)
-        if choice == "r":
-            pending = None
-
-
 def wizard_account(common_config: dict) -> tuple[str, str, bool]:
-    """步骤2: 输入账号密码, 返回 (账号, 密码, 是否保存)."""
-    print("\n[2/3] 账号登录")
+    """步骤1: 输入账号密码, 返回 (账号, 密码, 是否保存)."""
+    print("\n[1/2] 账号登录")
     saved_user = str(common_config.get("username", "") or "").strip()
     saved_pwd = str(common_config.get("password", "") or "").strip()
 
@@ -338,7 +306,7 @@ def wizard_account(common_config: dict) -> tuple[str, str, bool]:
 
 def wizard_runtime(common_config: dict) -> dict:
     """可选的运行参数, 直接回车使用默认值."""
-    print("\n[3/3] 运行参数 (直接回车使用默认值)")
+    print("\n[2/2] 运行参数 (直接回车使用默认值)")
     speed = ask(f"  视频倍速 1~2 [{common_config.get('speed', 1.0)}]: ")
     jobs = ask(f"  同时进行的章节数 [{common_config.get('jobs', 4)}]: ")
 
@@ -756,10 +724,17 @@ def build_config_from_args(args):
     return common_config, tiku_config
 
 
-def init_chaoxing(common_config, tiku_config, config_path=None, check_ai=True):
-    """初始化超星实例"""
+def init_chaoxing(common_config, tiku_config, config_path=None, check_ai=None):
+    """初始化超星实例.
+
+    check_ai 为 None 时, 由配置项 [tiku] check_llm_connection 决定是否做连通性测试.
+    """
     account = Account(common_config.get("username", ""), common_config.get("password", ""))
     tiku = create_tiku(tiku_config, config_path=config_path or CONFIG_PATH)
+
+    if check_ai is None:
+        raw = tiku_config.get("check_llm_connection", None)
+        check_ai = True if raw is None or str(raw).strip() == "" else str_to_bool(raw)
 
     if check_ai and not tiku.DISABLE and str(tiku_config.get("provider", "")).strip().upper() == "AI":
         logger.info("正在验证答题AI连通性...")
@@ -801,17 +776,33 @@ def run_non_interactive(common_config, tiku_config, course_list=None):
 
 
 def run_interactive():
-    """交互模式(默认): AI配置 -> 登录 -> 选课 -> 刷课."""
+    """默认模式: 读取 config.ini -> 登录 -> 选课 -> 刷课.
+
+    答题AI只能通过 config.ini 的 [tiku] 段配置, 程序不提供配置向导.
+    """
     print(BANNER)
 
+    # 首次运行: 根据模板生成一份无注释的 config.ini, 让用户自行填写
+    if not ensure_config(CONFIG_PATH):
+        print(f"  已生成配置文件: {CONFIG_PATH}")
+        print(tiku_config_hint())
+        return
+
     common_config, tiku_config = load_ini(CONFIG_PATH)
+
+    # 答题AI未配置完整时直接退出, 指引用户去改配置文件
+    missing = missing_tiku_fields(tiku_config)
+    if missing:
+        logger.error("答题AI配置不完整: " + ", ".join(missing))
+        print(tiku_config_hint())
+        return
+
+    tiku_config["endpoint"] = normalize_endpoint(tiku_config.get("endpoint", ""))
+
     base_common = default_common_config()
     base_common.update({k: v for k, v in common_config.items() if v is not None})
 
-    # 1. 答题AI
-    tiku_config = wizard_ai_config(tiku_config)
-
-    # 2. 账号
+    # 账号
     username, password, remember = wizard_account(base_common)
     base_common["username"] = username
     base_common["password"] = password if remember else ""
@@ -819,11 +810,11 @@ def run_interactive():
     # 运行参数
     base_common = wizard_runtime(base_common)
 
-    # 保存配置(无论是否记住密码, 都保存AI配置, 下次直接复用)
+    # 保存配置(无论是否记住密码, 都保存账号与运行参数)
     save_ini(CONFIG_PATH, base_common, tiku_config)
 
-    # 登录(向导阶段已做过连通性测试, 这里不再重复)
-    chaoxing = init_chaoxing(base_common, tiku_config, check_ai=False)
+    # 登录(连通性测试由 init_chaoxing 按 check_llm_connection 配置决定)
+    chaoxing = init_chaoxing(base_common, tiku_config)
     login_with_retry(chaoxing)
 
     # 课程选择

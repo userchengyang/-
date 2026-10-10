@@ -12,10 +12,10 @@
 
 ## :sparkles: 与上游的差异
 
-- **交互向导**：首次运行可视化配置答题 AI、账号与运行参数，自动生成 `config.ini`，无需手动改文件
-- **AI 答题**：题库模块收敛为单一 `AI` provider（OpenAI 兼容接口），支持连通性测试与模型列表拉取
+- **纯配置文件驱动**：答题 AI 的接口地址 / Key / 模型只能写在 `config.ini` 的 `[tiku]` 段，程序不提供任何交互式配置向导
+- **AI 答题**：题库模块收敛为单一 `AI` provider（OpenAI 兼容接口），支持连通性测试
 - **并发刷课**：按章节并发执行任务点，`jobs` 可调
-- **一键启动**：Windows 下双击 `启动.bat`，自动补装依赖
+- **一键启动**：Windows 下双击 `启动.bat`，自动识别本机 Python 并补装依赖
 - **移除部分上游功能**：第三方题库、外部通知、章节学习次数等未包含在本版本中
 
 ## :point_up: 功能
@@ -34,12 +34,20 @@
 
 ### 环境要求
 
-- Python **3.13+**（Windows / macOS / Linux）
+- Python **3.13+**（Windows / macOS / Linux），且 `python` 已加入 PATH
 - 一个 OpenAI 兼容接口（DeepSeek、Kimi、通义、OpenAI 等均可）
+
+> 本程序**不内置** Python 运行环境。目标电脑必须先装好 Python，否则无法启动。
 
 ### 一键启动（Windows）
 
-双击 `启动.bat`，按提示完成首次配置即可。
+1. 双击 `启动.bat`
+2. 首次运行会在同目录生成 `config.ini`，程序随即退出并提示你补全 `[tiku]` 段
+3. 编辑 `config.ini`，填好 `endpoint` / `key` / `model`
+4. 再次双击 `启动.bat`，按提示输入手机号与密码即可开始
+
+> `启动.bat` 会检测本机 Python，缺少依赖时自动 `pip install -r requirements.txt`。
+> 本机没有 Python 时会直接报错退出。
 
 ### 源码运行
 
@@ -48,12 +56,12 @@ git clone https://github.com/userchengyang/-.git
 cd <仓库目录>
 
 pip install -r requirements.txt
-python main.py            # 交互向导模式（推荐）
+python main.py            # 读取 config.ini, 交互输入账号密码
 ```
 
 ### 配置文件运行
 
-复制 `config_template.ini` 为 `config.ini`，填写账号与 AI 配置：
+`config_template.ini` 是**带注释的字段说明手册**，把它复制为 `config.ini` 并填写：
 
 ```bash
 python main.py -c config.ini
@@ -69,7 +77,7 @@ python main.py -u 手机号 -p 密码 \
 
 | 参数 | 说明 |
 | --- | --- |
-| `-c, --config` | 指定配置文件，跳过交互向导 |
+| `-c, --config` | 指定配置文件路径 |
 | `-u / -p` | 手机号 / 密码 |
 | `-l, --list` | 课程 ID 列表，逗号分隔（留空学习全部） |
 | `-s, --speed` | 视频倍速，默认 1，最大 2 |
@@ -89,7 +97,8 @@ docker run -it -v /本地路径/config.ini:/config/config.ini chaoxing
 
 ## :wrench: 答题 AI 配置
 
-配置文件 `[tiku]` 段（`provider` 固定为 `AI`）：
+答题 AI **只能**通过配置文件 `config.ini` 的 `[tiku]` 段配置（`provider` 固定为 `AI`），程序不再提供任何交互式配置向导。
+`endpoint`、`key`、`model` 三项缺任意一项，程序启动时会直接退出并提示。
 
 ```ini
 [tiku]
@@ -113,9 +122,9 @@ http_proxy =                  ; 可选, 例如 http://127.0.0.1:7890
 ## :page_facing_up: 项目结构
 
 ```
-├── main.py              # 入口：交互向导 / 命令行 / 配置文件三种模式
-├── 启动.bat              # Windows 一键启动
-├── config_template.ini  # 配置模板
+├── main.py              # 入口：默认读 config.ini；也支持命令行参数
+├── 启动.bat              # Windows 一键启动（检测本机 Python 并补装依赖）
+├── config_template.ini  # 带注释的字段说明手册
 ├── Dockerfile
 ├── api/
 │   ├── base.py          # Chaoxing 核心类：登录、课程、各类任务点
