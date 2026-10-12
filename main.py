@@ -3,14 +3,21 @@
 
 运行流程:
   1. 读取 config.ini (答题AI必须在该文件中配置, 程序不提供配置向导)
-  2. 输入账号密码登录
+  2. 首次运行: 输入账号密码登录, 成功后把账号绑定(锁定)到本机
+     之后运行: 自动沿用保存的登录态, 账号不可更换
   3. 展示课程列表, 选择要刷的课程
   4. 并发执行任务点(视频/文档/章节检测/阅读/直播)
 
+账号绑定:
+  绑定信息在程序目录的 account.json (含本机机器码, 拷到别的电脑会失效)。
+  手机/网页上改了密码 -> 本地密码失效 -> 启动时自动要求输入新密码(账号不能换)。
+  想解绑: 删掉 account.json 即可。
+
 模式:
-  python main.py                    # 默认: 读 config.ini, 交互输入账号密码
+  python main.py                    # 默认: 读 config.ini, 自动登录已绑定账号
   python main.py -c config.ini      # 使用指定配置文件
-  python main.py -u 账号 -p 密码     # 命令行参数
+  python main.py -u 账号 -p 密码     # 命令行参数(账号必须与已绑定账号一致)
+  python main.py --change-password  # 只更新绑定账号的密码
 """
 import argparse
 import configparser
@@ -28,6 +35,9 @@ from tqdm import tqdm
 
 from api.answer import Tiku
 from api.base import Chaoxing, Account, StudyResult
+from api.binding import STATUS_FOREIGN, AccountBinding, BindingError
+from api.config import GlobalConst as gc
+from api.device import get_machine_code
 from api.exceptions import LoginError, InputFormatError
 from api.logger import logger
 from api.live import Live
@@ -50,6 +60,7 @@ CONFIG_TEMPLATE_PATH = os.path.join(BASE_DIR, "config_template.ini")
 BANNER = """
 ============================================================
    超星学习通刷课 CLI   (核心刷课 + AI 答题)
+   首次登录成功后, 账号即绑定本机, 之后不可更换
 ============================================================
 """
 
@@ -274,34 +285,28 @@ def ask(prompt_text: str, default: str = "", secret: bool = False) -> str:
     return raw
 
 
-def wizard_account(common_config: dict) -> tuple[str, str, bool]:
-    """步骤1: 输入账号密码, 返回 (账号, 密码, 是否保存)."""
+def prompt_first_account() -> tuple[str, str]:
+    """步骤1(未绑定时): 输入账号密码."""
     print("\n[1/2] 账号登录")
-    saved_user = str(common_config.get("username", "") or "").strip()
-    saved_pwd = str(common_config.get("password", "") or "").strip()
-
-    if saved_user:
-        print(f"  检测到已保存账号: {saved_user}")
-        if ask("  回车使用该账号, 输入 n 更换: ", default="").lower() == "n":
-            saved_user = ""
-            saved_pwd = ""
-
-    username = saved_user or ask("  手机号账号: ")
+    print("  \033[33m首次使用: 登录成功后本机会锁定这个账号, 之后不能再更换\033[0m")
+    username = ask("  手机号账号: ")
     while not username:
         print("  \033[31m账号不能为空\033[0m")
         username = ask("  手机号账号: ")
 
-    if saved_pwd and saved_user:
-        password = saved_pwd
-        print("  使用已保存的密码")
-    else:
+    password = ask("  登录密码: ", secret=True)
+    while not password:
+        print("  \033[31m密码不能为空\033[0m")
         password = ask("  登录密码: ", secret=True)
-        while not password:
-            print("  \033[31m密码不能为空\033[0m")
-            password = ask("  登录密码: ", secret=True)
+    return username, password
 
-    save = bool(password) and ask("  是否记住账号密码到 config.ini? (Y/n): ", default="y").lower() != "n"
-    return username, password, save
+
+def show_bound_account(binding: AccountBinding) -> None:
+    """步骤1(已绑定时): 只读展示, 不给任何换号入口."""
+    print("\n[1/2] 账号")
+    print(f"  已绑定: {binding.describe()}")
+    if binding.last_login:
+        print(f"  上次登录: {binding.last_login}")
 
 
 def wizard_runtime(common_config: dict) -> dict:
@@ -327,18 +332,133 @@ def wizard_runtime(common_config: dict) -> dict:
     return config
 
 
-def login_with_retry(chaoxing: Chaoxing) -> None:
-    """登录, 失败时允许重新输入账号密码."""
+def current_uid(chaoxing: Chaoxing) -> str:
+    try:
+        return str(chaoxing.get_uid())
+    except Exception:
+        return ""
+
+
+def current_realname(chaoxing: Chaoxing) -> str:
+    try:
+        return chaoxing.get_name() or ""
+    except Exception:
+        return ""
+
+
+def login_and_bind(chaoxing: Chaoxing, binding: AccountBinding) -> None:
+    """未绑定: 登录成功后落绑定。此时账号密码输错了还能重来(还没锁号)."""
     while True:
         state = chaoxing.login(login_with_cookies=False)
         if state["status"]:
+            binding.bind(
+                chaoxing.account.username,
+                chaoxing.account.password,
+                uid=current_uid(chaoxing),
+                realname=current_realname(chaoxing),
+            )
+            print(f"  \033[32m账号已绑定本机: {binding.username}\033[0m")
             return
         logger.error(f"登录失败: {state['msg']}")
-        if ask("  重新输入账号密码? 回车重试, 输入 q 退出: ", default="").lower() == "q":
+        if ask("  回车重新输入, 输入 q 退出: ", default="").lower() == "q":
             raise LoginError(state["msg"])
         username = ask("  手机号账号: ")
         password = ask("  登录密码: ", secret=True)
+        if not username or not password:
+            continue
         chaoxing.account = Account(username, password)
+
+
+def try_saved_cookie(chaoxing: Chaoxing, binding: AccountBinding) -> bool:
+    """用 cookies.txt 恢复登录态。
+
+    uid 对不上说明这份 cookie 是别的账号留下的, 直接作废 —— 否则绑了 A 号
+    却拿着 B 号的 cookie 去刷课, 会静默刷错人。
+    """
+    if not os.path.isfile(gc.COOKIES_PATH):
+        return False
+    state = chaoxing.login(login_with_cookies=True)
+    if not state["status"]:
+        return False
+
+    uid = current_uid(chaoxing)
+    if binding.uid and uid and uid != binding.uid:
+        logger.warning("cookies 属于另一个账号, 已忽略, 改用保存的密码登录")
+        return False
+    return True
+
+
+def login_bound(chaoxing: Chaoxing, binding: AccountBinding, allow_prompt: bool = True) -> None:
+    """已绑定账号的登录: 保存的登录态 -> 保存的密码 -> 只让改密码(账号锁死)."""
+    if try_saved_cookie(chaoxing, binding):
+        binding.touch_login(uid=current_uid(chaoxing), realname=current_realname(chaoxing))
+        logger.info(f"已沿用上次登录状态: {binding.username}")
+        return
+
+    saved = binding.password
+    if saved and chaoxing.account.password != saved:
+        # 命令行 -p 传了新密码: 拿它试, 成功就把本地那份更新掉
+        pass
+    else:
+        chaoxing.account.password = saved
+
+    if chaoxing.account.password:
+        state = chaoxing.login(login_with_cookies=False)
+        if state["status"]:
+            if chaoxing.account.password != saved:
+                binding.update_password(chaoxing.account.password)
+            binding.touch_login(uid=current_uid(chaoxing), realname=current_realname(chaoxing))
+            logger.info(f"登录成功: {binding.username}")
+            return
+        last_msg = str(state["msg"])
+    else:
+        last_msg = "本地没有可用的登录状态"
+
+    # 走到这里: 登录态和保存的密码都失效了, 大概率是手机号改过密码
+    if not allow_prompt:
+        raise LoginError(
+            f"账号 {binding.username} 登录失败({last_msg}). "
+            f"若已修改过密码, 请用 -p 传新密码, 或运行 --change-password 更新"
+        )
+
+    print(f"\n  \033[33m账号 {binding.username} 登录失败: {last_msg}\033[0m")
+    print("  如果你在手机/网页上改过密码, 在这里输入新密码即可(账号不能更换)")
+    while True:
+        password = ask("  新的登录密码(输入 q 退出): ", secret=True)
+        if password.lower() == "q":
+            raise LoginError(f"账号 {binding.username} 登录失败: {last_msg}")
+        if not password:
+            continue
+        chaoxing.account.password = password
+        state = chaoxing.login(login_with_cookies=False)
+        if state["status"]:
+            binding.update_password(password)
+            binding.touch_login(uid=current_uid(chaoxing), realname=current_realname(chaoxing))
+            print(f"  \033[32m密码已更新, 登录成功: {binding.username}\033[0m")
+            return
+        logger.error(f"登录失败: {state['msg']}")
+
+
+def perform_login(chaoxing: Chaoxing, binding: AccountBinding, allow_prompt: bool = True) -> None:
+    """登录总入口: 已绑定走锁定流程, 未绑定走首次绑定流程."""
+    binding.require_machine()
+    if binding.is_bound:
+        login_bound(chaoxing, binding, allow_prompt=allow_prompt)
+    else:
+        login_and_bind(chaoxing, binding)
+
+
+def load_binding() -> AccountBinding:
+    """读取绑定并检查机器码, 机器不符直接抛错退出."""
+    binding = AccountBinding().load()
+    if binding.status == STATUS_FOREIGN:
+        print(f"\n  \033[31m账号绑定文件不属于这台电脑\033[0m")
+        print(f"    文件记录的机器码: {binding.machine_code or '未知'}")
+        print(f"    本机机器码:       {get_machine_code()}")
+        print("\n  这份 account.json 是从别的电脑复制过来的, 本程序一机一号。")
+        print("  如需在本机重新绑定, 请先删除程序目录下的 account.json。")
+        raise BindingError("机器码不匹配")
+    return binding
 
 
 def select_courses(all_course: list[dict]) -> list[dict]:
@@ -697,6 +817,8 @@ def parse_args():
     parser.add_argument("-s", "--speed", type=float, default=1.0, help="视频播放倍速 (默认1, 最大2)")
     parser.add_argument("-j", "--jobs", type=int, default=4, help="同时进行的章节数 (默认4)")
     parser.add_argument("--use-cookies", action="store_true", help="使用cookies登录")
+    parser.add_argument("--change-password", action="store_true",
+                        help="更新本机已绑定账号的登录密码(账号不可更改)")
     parser.add_argument("-a", "--notopen-action", type=str, default="retry",
                         choices=["retry", "ask", "continue"],
                         help="遇到关闭任务点时的行为: retry-重试, ask-询问, continue-继续")
@@ -754,16 +876,33 @@ def init_chaoxing(common_config, tiku_config, config_path=None, check_ai=None):
     return chaoxing
 
 
+def strip_account(config: dict) -> dict:
+    """账号密码只存在 account.json 里, 不落 config.ini."""
+    out = dict(config)
+    out.pop("username", None)
+    out.pop("password", None)
+    return out
+
+
 def run_non_interactive(common_config, tiku_config, course_list=None):
     """命令行/配置文件模式."""
     common_config["speed"] = min(2.0, max(1.0, float(common_config.get("speed", 1.0))))
     common_config.setdefault("notopen_action", "retry")
 
-    chaoxing = init_chaoxing(common_config, tiku_config)
+    binding = load_binding()
+    if binding.is_bound:
+        wanted = str(common_config.get("username", "") or "").strip()
+        if wanted and wanted != binding.username:
+            raise BindingError(
+                f"本机已绑定账号 {binding.username}, 不能切换到 {wanted}。"
+                f"确需换号请先删除 account.json 并重新授权"
+            )
+        common_config["username"] = binding.username
+        if not str(common_config.get("password", "") or "").strip():
+            common_config["password"] = binding.password
 
-    state = chaoxing.login(login_with_cookies=bool(common_config.get("use_cookies", False)))
-    if not state["status"]:
-        raise LoginError(state["msg"])
+    chaoxing = init_chaoxing(common_config, tiku_config)
+    perform_login(chaoxing, binding, allow_prompt=False)
 
     all_course = chaoxing.get_course_list()
     course_task = filter_courses(all_course, course_list if course_list is not None else common_config.get("course_list"))
@@ -802,20 +941,32 @@ def run_interactive():
     base_common = default_common_config()
     base_common.update({k: v for k, v in common_config.items() if v is not None})
 
-    # 账号
-    username, password, remember = wizard_account(base_common)
-    base_common["username"] = username
-    base_common["password"] = password if remember else ""
+    # 账号: 已绑定则锁定, 未绑定则首次输入
+    binding = load_binding()
+    if binding.is_bound:
+        stale = str(common_config.get("username", "") or "").strip()
+        if stale and stale != binding.username:
+            logger.warning(
+                f"config.ini 里的账号 {stale} 已失效, 以本机绑定的 {binding.username} 为准"
+            )
+        show_bound_account(binding)
+        base_common["username"] = binding.username
+        base_common["password"] = binding.password
+        base_common["use_cookies"] = True
+    else:
+        username, password = prompt_first_account()
+        base_common["username"] = username
+        base_common["password"] = password
 
     # 运行参数
     base_common = wizard_runtime(base_common)
 
-    # 保存配置(无论是否记住密码, 都保存账号与运行参数)
-    save_ini(CONFIG_PATH, base_common, tiku_config)
+    # 保存配置: 账号密码不进 config.ini, 只存在 account.json
+    save_ini(CONFIG_PATH, strip_account(base_common), tiku_config)
 
     # 登录(连通性测试由 init_chaoxing 按 check_llm_connection 配置决定)
     chaoxing = init_chaoxing(base_common, tiku_config)
-    login_with_retry(chaoxing)
+    perform_login(chaoxing, binding, allow_prompt=True)
 
     # 课程选择
     all_course = chaoxing.get_course_list()
@@ -828,9 +979,38 @@ def run_interactive():
     logger.info("所有课程学习任务已完成")
 
 
+def change_password_flow() -> int:
+    """--change-password: 只更新绑定账号的密码, 账号保持锁定."""
+    print(BANNER)
+    binding = load_binding()
+    if not binding.is_bound:
+        print("  本机还没有绑定账号, 请先正常运行一次完成登录绑定。")
+        return 1
+
+    print(f"  当前绑定账号: {binding.describe()}")
+    print("  只更新密码, 账号不会改变。\n")
+    while True:
+        password = ask("  新的登录密码(输入 q 退出): ", secret=True)
+        if password.lower() == "q":
+            return 1
+        if not password:
+            continue
+        chaoxing = Chaoxing(account=Account(binding.username, password))
+        state = chaoxing.login(login_with_cookies=False)
+        if state["status"]:
+            binding.update_password(password)
+            binding.touch_login(uid=current_uid(chaoxing), realname=current_realname(chaoxing))
+            print(f"  \033[32m密码已更新, 验证登录成功\033[0m")
+            return 0
+        logger.error(f"登录失败: {state['msg']}")
+
+
 def main():
     """主程序入口"""
     args = parse_args()
+
+    if args.change_password:
+        sys.exit(change_password_flow())
 
     if args.config or args.username:
         common_config, tiku_config = load_ini(args.config) if args.config else ({}, {})
@@ -857,6 +1037,8 @@ if __name__ == "__main__":
         sys.exit(e.code)
     except KeyboardInterrupt:
         logger.error("程序被用户手动中断")
+    except BindingError as e:
+        logger.error(f"账号绑定校验未通过: {e}")
     except LoginError as e:
         logger.error(f"登录失败: {e}")
     except BaseException as e:

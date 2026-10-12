@@ -157,3 +157,11 @@ cache.json
 start*.bat
 .workbuddy/
 myConfig/
+
+# 账号绑定凭据（含 AES 加密的本机密码，绝不入库）
+account.json
+
+# 便携版运行环境（由 制作便携版.bat 生成）
+/python/
+/vendor/
+*.zip

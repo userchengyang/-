@@ -27,7 +27,7 @@
 | 阅读 | 自动完成阅读任务点 |
 | 章节检测 | AI 作答 + 覆盖率判定 + 提交 / 保存，支持答错重做 |
 | 直播 | 独立线程处理直播任务点 |
-| 登录 | 账号密码 / Cookie 两种方式，登录失败自动重试 |
+| 登录 | 首次登录后账号绑定本机，之后自动沿用登录态，账号不可更换 |
 | 关闭任务点 | `retry` / `ask` / `continue` 三种策略 |
 
 ## :books: 使用方法
@@ -44,7 +44,8 @@
 1. 双击 `启动.bat`
 2. 首次运行会在同目录生成 `config.ini`，程序随即退出并提示你补全 `[tiku]` 段
 3. 编辑 `config.ini`，填好 `endpoint` / `key` / `model`
-4. 再次双击 `启动.bat`，按提示输入手机号与密码即可开始
+4. 再次双击 `启动.bat`，输入手机号与密码；登录成功后账号即绑定本机
+5. 之后每次双击都是自动登录，直接进选课界面
 
 > `启动.bat` 会检测本机 Python，缺少依赖时自动 `pip install -r requirements.txt`。
 > 本机没有 Python 时会直接报错退出。
@@ -56,7 +57,7 @@ git clone https://github.com/userchengyang/-.git
 cd <仓库目录>
 
 pip install -r requirements.txt
-python main.py            # 读取 config.ini, 交互输入账号密码
+python main.py            # 读取 config.ini, 自动登录已绑定账号(首次会要求输入)
 ```
 
 ### 配置文件运行
@@ -78,13 +79,31 @@ python main.py -u 手机号 -p 密码 \
 | 参数 | 说明 |
 | --- | --- |
 | `-c, --config` | 指定配置文件路径 |
-| `-u / -p` | 手机号 / 密码 |
+| `-u / -p` | 手机号 / 密码（账号必须与已绑定账号一致；`-p` 传新密码会同步更新本地） |
 | `-l, --list` | 课程 ID 列表，逗号分隔（留空学习全部） |
 | `-s, --speed` | 视频倍速，默认 1，最大 2 |
 | `-j, --jobs` | 并发章节数，默认 4 |
-| `--use-cookies` | 使用 `cookies.txt` 登录 |
+| `--use-cookies` | 已废弃，登录态现在自动沿用 |
+| `--change-password` | 只更新已绑定账号的密码，账号不变 |
 | `-a, --notopen-action` | 关闭任务点策略：`retry` / `ask` / `continue` |
 | `--retry-interval` | 重试等待秒数，默认 1.0 |
+
+### 账号绑定（一机一号）
+
+首次登录成功后，程序会生成 `account.json`，把账号锁死在这台机器上：
+
+- **之后每次启动自动沿用登录态**，不用再输密码；登录态过期时用本地保存的密码静默重登
+- **账号不可更换**：交互界面不给换号入口，命令行 `-u` 传别的号会直接拒绝
+- **在手机 / 网页上改了密码** → 本地那份失效 → 启动时提示输入新密码（账号不变），
+  也可以随时单独跑一次 `启动.bat --change-password`
+- **一机一号**：`account.json` 记了本机机器码，整个文件夹拷到别的电脑会判定无效。
+  需要在某台机器上重新绑定，删掉 `account.json` 再运行一次即可
+
+> 这层做的是抬高随手换号的成本，不是安全边界：密码用内置密钥做 AES，只防明文出现在文件里，
+> 挡不住逆向。账号密码不再写进 `config.ini`。
+>
+> 注意：程序会校验登录态属于哪个账号。如果 `cookies.txt` 里残留的是别的号的 cookie，
+> 会被丢弃并改用保存的密码重新登录 —— 不会拿错号的登录态去刷课。
 
 ### Docker 运行
 
@@ -122,15 +141,20 @@ http_proxy =                  ; 可选, 例如 http://127.0.0.1:7890
 ## :page_facing_up: 项目结构
 
 ```
-├── main.py              # 入口：默认读 config.ini；也支持命令行参数
+├── main.py              # 入口：读 config.ini → 自动登录绑定账号 → 选课 → 刷课
 ├── 启动.bat              # Windows 一键启动（检测本机 Python 并补装依赖）
+├── 制作便携版.bat / 打包便携版.bat  # 构建可脱离 Python 独立运行的便携版
 ├── config_template.ini  # 带注释的字段说明手册
+├── account.json         # 运行期生成：账号绑定（含机器码，删掉即解绑）
+├── cookies.txt          # 运行期生成：登录态
 ├── Dockerfile
 ├── api/
 │   ├── base.py          # Chaoxing 核心类：登录、课程、各类任务点
 │   ├── answer.py        # 答题模块（AI / OpenAI 兼容接口）与答案缓存
 │   ├── answer_check.py  # 答案检查与验证
-│   ├── cipher.py        # AES 加解密
+│   ├── binding.py       # 账号绑定：一机一号、锁死账号、只允许改密码
+│   ├── device.py        # 机器指纹
+│   ├── cipher.py        # AES 加解密（登录参数 + 本地保存的密码）
 │   ├── cookies.py       # Cookie 管理
 │   ├── cxsecret_font.py / font_decoder.py / decode.py  # 超星字体与页面解析
 │   ├── live.py / live_process.py                       # 直播任务

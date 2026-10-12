@@ -7,6 +7,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 class GlobalConst:
     AESKey = "u2oh6Vu^HWe4_AES"
     COOKIES_PATH = os.path.join(PROJECT_ROOT, "cookies.txt")
+    # 账号绑定文件: 首次登录成功后生成, 之后账号锁死, 删掉它即可解绑
+    BINDING_PATH = os.path.join(PROJECT_ROOT, "account.json")
 
     HEADERS = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
